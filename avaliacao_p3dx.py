@@ -7,11 +7,12 @@ Avaliação: Navegação Contínua do Pioneer 3DX na Linha de Montagem
 
 Este programa implementa as quatro tarefas da avaliação:
   - Tarefa A: Controle contínuo até uma pose em coordenadas polares (Siegwart / Aicardi).
-  - Tarefa B: Roteiro contínuo entre blocos por seguidor de caminho (retas + arcos de raio 0.5 m).
+  - Tarefa B: Roteiro contínuo entre blocos por seguidor de caminho (retas + arcos de raio 0.5 m)
+              e demonstração do efeito da lei polar aplicada diretamente ao roteiro.
   - Tarefa C: Análise de robustez a ruído (odometria gaussiana + atuação multiplicativa, 10 execuções).
-  - Tarefa D: Comparação quantitativa entre três estratégias de navegação:
-              1) Seguidor de Caminho
-              2) Lei Polar ponto-a-ponto
+  - Tarefa D: Comparação quantitativa (com e sem ruído) entre três estratégias de navegação:
+              1) Seguidor de Caminho (Tarefa B)
+              2) Lei Polar ponto-a-ponto (Tarefa A com quinas como pontos de passagem)
               3) Controlador em Duas Fases (Gira-Anda-Gira)
 
 Requisitos: numpy, matplotlib (sem dependências externas adicionais).
@@ -37,7 +38,7 @@ from pioneer3dx import Pioneer3DX
 from cenario_linha_montagem import cenario_linha_montagem, OBSTACULOS, ESTACOES, QUINAS
 
 # ==============================================================================
-# CONFIGURAÇÕES GERAIS E SELEÇÃO DE TAREFA
+# CONFIGURAÇÕES GERAIS E SELEÇÃO DE TAREFA (VARIÁVEIS DE TOPO)
 # ==============================================================================
 # Escolha a tarefa a executar: 'A', 'B', 'C', 'D' ou 'TODAS'
 TAREFA = 'B'
@@ -54,8 +55,9 @@ PASTA_FIGURAS = 'figuras'
 
 # Limites físicos e de controle do Pioneer 3DX
 U_MAX = 0.75                  # m/s
-W_MAX = np.deg2rad(100.0)     # rad/s (~1.745 rad/s)
+W_MAX = np.deg2rad(100.0)     # rad/s (~1.7453 rad/s)
 DT_NOMINAL = 0.1              # 10 Hz
+MARGEM_SEGURANCA_OBS = 0.35   # m (distância mínima obrigatória aos obstáculos)
 
 
 # ==============================================================================
@@ -179,8 +181,8 @@ def construir_caminho_referencia(raio_arco=0.5):
     return segments
 
 
-def obter_pontos_caminho_referencia(segments, num_pontos=2000):
-    """Gera uma lista densa de pontos (x, y) do caminho de referência para plotagem."""
+def obter_pontos_caminho_referencia(segments, num_pontos=3000):
+    """Gera uma lista densa de pontos (x, y) do caminho de referência para plotagem e avaliação."""
     pts = []
     total_L = sum(s['length'] for s in segments)
     for s in segments:
@@ -193,13 +195,44 @@ def obter_pontos_caminho_referencia(segments, num_pontos=2000):
         elif s['type'] == 'arc':
             c = s['center']
             r = s['r']
-            if s['ccw']:
-                thetas = np.linspace(s['t1'], s['t2'], n_seg)
-            else:
-                thetas = np.linspace(s['t1'], s['t2'], n_seg)
+            thetas = np.linspace(s['t1'], s['t2'], n_seg)
             for th in thetas:
                 pts.append((c[0] + r * np.cos(th), c[1] + r * np.sin(th)))
     return np.array(pts)
+
+
+def calcular_desvio_caminho_referencia(xy_traj, ref_pts):
+    """
+    Calcula o maior desvio (máximo, em cm) e a média quadrática (RMS, em cm)
+    de uma sequência de posições (x, y) em relação ao caminho de referência (retas + arcos).
+    """
+    xy = np.asarray(xy_traj, dtype=float)
+    diffs = xy[:, None, :] - ref_pts[None, :, :]
+    dists = np.hypot(diffs[:, :, 0], diffs[:, :, 1])
+    min_d = np.min(dists, axis=1)
+    max_cm = float(np.max(min_d) * 100.0)
+    rms_cm = float(np.sqrt(np.mean(min_d ** 2)) * 100.0)
+    return max_cm, rms_cm
+
+
+def imprimir_tabela_metricas(titulo, tempo, comprimento, rho_cm, psi_deg, dev_max_cm, dev_rms_cm, folga_m, int_u2, int_w2):
+    """Imprime no terminal a tabela padronizada das 6 métricas da Seção 5 do enunciado."""
+    status_seguranca = "APROVADO (>= 0.35 m)" if folga_m >= MARGEM_SEGURANCA_OBS else "VIOLADO (< 0.35 m)!"
+    print("\n" + "=" * 82)
+    print(titulo)
+    print("=" * 82)
+    print(f"{'Métrica (Seção 5)':35s} | {'Valor Obtido':18s} | {'Unidade':8s} | {'Requisito':12s}")
+    print("-" * 82)
+    print(f"{'1. Tempo total':35s} | {tempo:18.1f} | {'s':8s} | {'<= 300 s':12s}")
+    print(f"{'2. Comprimento percorrido':35s} | {comprimento:18.2f} | {'m':8s} | {'Ref: 57.1 m':12s}")
+    print(f"{'3. Erro médio nas estações (rho)':35s} | {rho_cm:18.2f} | {'cm':8s} | {'< 3.0 cm':12s}")
+    print(f"{'3. Erro médio nas estações (|dpsi|)':35s} | {psi_deg:18.2f} | {'°':8s} | {'< 2.0°':12s}")
+    print(f"{'4. Desvio da referência (Máx.)':35s} | {dev_max_cm:18.2f} | {'cm':8s} | {'<= 5.0 cm':12s}")
+    print(f"{'4. Desvio da referência (RMS)':35s} | {dev_rms_cm:18.2f} | {'cm':8s} | {'---':12s}")
+    print(f"{'5. Folga mínima aos obstáculos':35s} | {folga_m:18.3f} | {'m':8s} | {status_seguranca:12s}")
+    print(f"{'6. Esforço linear int(u^2 dt)':35s} | {int_u2:18.2f} | {'m^2/s':8s} | {'---':12s}")
+    print(f"{'6. Esforço angular int(w^2 dt)':35s} | {int_w2:18.2f} | {'rad^2/s':8s} | {'---':12s}")
+    print("=" * 82)
 
 
 # ==============================================================================
@@ -213,11 +246,10 @@ def executar_tarefa_a(plotar=True, salvar=SALVAR_GRAFICOS):
       2) Destino ao lado:   (0, 2, 90°)
       3) Destino atrás:     (-2, 0, 180°)
     """
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 75)
     print("EXECUTANDO TAREFA A — CONTROLE CONTÍNUO ATÉ UMA POSE (LEI POLAR)")
-    print("=" * 70)
+    print("=" * 75)
 
-    # Condições de teste
     casos = [
         {"nome": "Destino à Frente (3, 1, 0°)", "xd": 3.0, "yd": 1.0, "psif_deg": 0.0, "cor": "blue"},
         {"nome": "Destino ao Lado (0, 2, 90°)", "xd": 0.0, "yd": 2.0, "psif_deg": 90.0, "cor": "green"},
@@ -233,6 +265,9 @@ def executar_tarefa_a(plotar=True, salvar=SALVAR_GRAFICOS):
     dt = DT_NOMINAL
     historicos = {}
 
+    print(f"{'Caso de Teste':30s} | {'Tempo':6s} | {'Comp.':7s} | {'Erro rho':9s} | {'Erro |dpsi|':11s} | {'int(u^2)':8s} | {'int(w^2)':8s} | {'Status'}")
+    print("-" * 102)
+
     for caso in casos:
         nome = caso['nome']
         xd, yd = caso['xd'], caso['yd']
@@ -244,6 +279,10 @@ def executar_tarefa_a(plotar=True, salvar=SALVAR_GRAFICOS):
         t = 0.0
         t_max = 25.0
         log = []
+        comp_total = 0.0
+        prev_pos = P.pPos.Xc[[0, 1]].copy()
+        int_u2 = 0.0
+        int_w2 = 0.0
 
         arrived = False
         while t < t_max:
@@ -256,6 +295,7 @@ def executar_tarefa_a(plotar=True, salvar=SALVAR_GRAFICOS):
             rho = np.sqrt(dx * dx + dy * dy)
 
             # Critério de chegada: rho < 3 cm e |psi_f - psi| < 2 deg
+            # Proteção contra a singularidade da lei polar em rho -> 0 (atan2(0,0) indefinido)
             if rho < 0.03:
                 err_psi = wrap_angle(psif - psi)
                 if abs(err_psi) < np.deg2rad(2.0):
@@ -269,8 +309,9 @@ def executar_tarefa_a(plotar=True, salvar=SALVAR_GRAFICOS):
                 beta = wrap_angle(psif - psi - alpha)
 
                 # Tratamento para |alpha| > 90°:
-                # Se o alvo está atrás do robô, modular u por cos(alpha) suaviza a trajetória
-                # evitando cusps excessivos em espaço livre.
+                # Se o alvo está atrás do robô, modular u por max(0, cos(alpha)) zera suavemente
+                # o avanço frontal enquanto o robô gira em direção ao semiespaço do destino,
+                # evitando laçadas amplas (cusps) na direção oposta ao alvo.
                 u = kp * rho * max(0.0, np.cos(alpha))
                 w = ka * alpha + kb * beta
 
@@ -278,24 +319,30 @@ def executar_tarefa_a(plotar=True, salvar=SALVAR_GRAFICOS):
             P.pSC.Ud = np.array([u_sat, w_sat])
             P.rSendControlSignals(dt=dt)
 
+            cur_pos = P.pPos.Xc[[0, 1]].copy()
+            comp_total += np.linalg.norm(cur_pos - prev_pos)
+            prev_pos = cur_pos
+            int_u2 += (u_sat ** 2) * dt
+            int_w2 += (w_sat ** 2) * dt
+
             log.append([t, xc, yc, psi, rho, u_sat, w_sat])
             t += dt
 
             if arrived and t > 5.0:
-                # Mantém parado após atingir a meta
                 break
 
         log = np.array(log)
+        pos_err = np.sqrt((xd - log[-1, 1])**2 + (yd - log[-1, 2])**2)
+        ang_err = np.rad2deg(abs(wrap_angle(psif - log[-1, 3])))
+        status = 'SUCESSO' if (pos_err < 0.03 and ang_err < 2.0) else 'FALHA'
+
         historicos[nome] = {
             'log': log, 'xd': xd, 'yd': yd, 'psif': psif,
-            'pos_err': np.sqrt((xd - log[-1, 1])**2 + (yd - log[-1, 2])**2),
-            'ang_err': np.rad2deg(abs(wrap_angle(psif - log[-1, 3]))),
-            'time': t
+            'pos_err': pos_err, 'ang_err': ang_err,
+            'time': t, 'length': comp_total, 'int_u2': int_u2, 'int_w2': int_w2
         }
 
-        print(f"[{nome}] Tempo: {t:.1f}s | Erro Posição: {historicos[nome]['pos_err']*100:.2f} cm | "
-              f"Erro Orientação: {historicos[nome]['ang_err']:.2f}° | "
-              f"Convergência: {'SUCESSO' if historicos[nome]['pos_err'] < 0.03 and historicos[nome]['ang_err'] < 2.0 else 'FALHA'}")
+        print(f"{nome:30s} | {t:5.1f}s | {comp_total:5.2f} m | {pos_err*100:6.2f} cm | {ang_err:9.2f}° | {int_u2:8.2f} | {int_w2:8.2f} | {status}")
 
     if plotar:
         os.makedirs(PASTA_FIGURAS, exist_ok=True)
@@ -308,7 +355,6 @@ def executar_tarefa_a(plotar=True, salvar=SALVAR_GRAFICOS):
         ax.set_xlabel("x (m)")
         ax.set_ylabel("y (m)")
 
-        # Ponto inicial
         ax.plot(0, 0, 'ko', markersize=8, label="Partida (0, 0, 0°)")
         ax.quiver(0, 0, 0.4 * np.cos(0), 0.4 * np.sin(0), angles='xy', scale_units='xy', scale=1, color='k', width=0.007)
 
@@ -318,7 +364,6 @@ def executar_tarefa_a(plotar=True, salvar=SALVAR_GRAFICOS):
             log = d['log']
             cor = caso['cor']
             ax.plot(log[:, 1], log[:, 2], label=f"{nome}", color=cor, linewidth=2)
-            # Ponto final
             ax.plot(d['xd'], d['yd'], 'o', color=cor, markersize=7)
             ax.quiver(d['xd'], d['yd'], 0.4 * np.cos(d['psif']), 0.4 * np.sin(d['psif']),
                       angles='xy', scale_units='xy', scale=1, color=cor, width=0.006)
@@ -376,7 +421,7 @@ def executar_seguidor_caminho(ruido=False, semente=None, animar=ANIMACAO, plotar
       - Transição contínua sem parada nas quinas
       - Parada nas estações (rho < 3 cm, |psi_f - psi| < 2 deg)
       - Lei de controle:
-          u = u_ref * max(cos(e_psi), 0)
+          u = clip(u_ref * max(cos(e_psi), 0), -U_MAX, U_MAX)
           w = u * kappa + k_psi * e_psi - k_y * u * e_y
     """
     rng = np.random.default_rng(semente) if ruido else None
@@ -448,7 +493,7 @@ def executar_seguidor_caminho(ruido=False, semente=None, animar=ANIMACAO, plotar
         e_y_ctrl = 0.0
         e_psi_ctrl = 0.0
 
-        # Máquina de estados para navegação e estações
+        # 2. Controlador (Máquina de estados para navegação contínua e paradas nas estações)
         if state == 'ALIGN_START':
             # Alinhamento inicial da Base para o primeiro trecho (+x)
             target_psi = segments[0]['heading']
@@ -482,14 +527,15 @@ def executar_seguidor_caminho(ruido=False, semente=None, animar=ANIMACAO, plotar
                         state = 'STOP_AT_STATION'
                         u, w = 0.0, 0.0
                     else:
-                        u = u_ref * max(np.cos(e_psi_ctrl), 0.0)
+                        # Limita u antes de calcular w para manter consistência com u*kappa e -k_y*u*e_y
+                        u = np.clip(u_ref * max(np.cos(e_psi_ctrl), 0.0), -U_MAX, U_MAX)
                         w = u * kappa + k_psi * e_psi_ctrl - k_y * u * e_y_ctrl
                 elif not cur_seg['is_station'] and rem_dist <= 0.03:
                     # Transição imediata e suave para a próxima quina/curva sem parada
                     seg_idx += 1
                     continue
                 else:
-                    u = u_nom * max(np.cos(e_psi_ctrl), 0.0)
+                    u = np.clip(u_nom * max(np.cos(e_psi_ctrl), 0.0), -U_MAX, U_MAX)
                     w = u * kappa + k_psi * e_psi_ctrl - k_y * u * e_y_ctrl
 
             elif cur_seg['type'] == 'arc':
@@ -519,11 +565,11 @@ def executar_seguidor_caminho(ruido=False, semente=None, animar=ANIMACAO, plotar
                 e_psi_ctrl = wrap_angle(heading - psi_ctrl)
                 rem_dist = L - arc_progress
                 if rem_dist <= 0.03:
-                    # Transição da curva para a reta tangente subsequente
+                    # Transição da curva para a reta tangente subsequente sem parar
                     seg_idx += 1
                     continue
                 else:
-                    u = u_arc * max(np.cos(e_psi_ctrl), 0.0)
+                    u = np.clip(u_arc * max(np.cos(e_psi_ctrl), 0.0), -U_MAX, U_MAX)
                     w = u * kappa + k_psi * e_psi_ctrl - k_y * u * e_y_ctrl
 
         elif state == 'STOP_AT_STATION':
@@ -534,7 +580,6 @@ def executar_seguidor_caminho(ruido=False, semente=None, animar=ANIMACAO, plotar
             err_psi_true = abs(wrap_angle(psi_f - psi_true))
 
             if abs(err_psi) < np.deg2rad(1.0):
-                # Meta da estação alcançada
                 station_metrics.append({
                     'name': cur_seg['name'],
                     'rho_cm': dist_to_target_true * 100.0,
@@ -569,7 +614,7 @@ def executar_seguidor_caminho(ruido=False, semente=None, animar=ANIMACAO, plotar
                 u = 0.0
                 w = np.clip(3.0 * err_psi, -np.deg2rad(80), np.deg2rad(80))
 
-        # Saturação preservando a razão u/w
+        # Saturação no controlador preservando a razão u/w
         u_sat, w_sat = saturate_ratio(u, w)
 
         # Injeção de ruído de atuação multiplicativo: u e w * (1 + N(0, 0.05))
@@ -580,12 +625,12 @@ def executar_seguidor_caminho(ruido=False, semente=None, animar=ANIMACAO, plotar
         else:
             u_applied, w_applied = u_sat, w_sat
 
-        # 3. Enviar sinais de controle
+        # 3. Enviar sinais de controle (pSC.Ud -> rSendControlSignals)
         P.pSC.Ud = np.array([u_applied, w_applied])
         P.rSendControlSignals(dt=dt)
         t += dt
 
-        # Métricas calculadas com a POSE VERDADEIRA do robô
+        # 4. Métricas calculadas com a POSE VERDADEIRA do simulador
         cur_pos = P.pPos.Xc[[0, 1]].copy()
         step_len = np.linalg.norm(cur_pos - prev_pos)
         comprimento_total += step_len
@@ -623,7 +668,7 @@ def executar_seguidor_caminho(ruido=False, semente=None, animar=ANIMACAO, plotar
         log.append([t, xc_true, yc_true, psi_true, xc_ctrl, yc_ctrl, psi_ctrl,
                     u_applied, w_applied, ey_true, epsi_true, state])
 
-        # Animação gráfica
+        # 5. Plotagem mCADplot (quando animação ativa)
         if animar and len(log) % 3 == 0:
             P.mCADplot(ax_anim)
             rastro_x.append(xc_true)
@@ -654,14 +699,19 @@ def executar_seguidor_caminho(ruido=False, semente=None, animar=ANIMACAO, plotar
     # Gráficos da Tarefa B
     if plotar:
         os.makedirs(PASTA_FIGURAS, exist_ok=True)
-        # 1. Trajetória com Cenário Completo
+        # Executa também a lei polar no roteiro para demonstrar as ondulações conforme pedido na Tarefa B
+        res_polar_b = executar_estrategia_polar(ruido=ruido, semente=semente if semente is not None else 42)
+
+        # 1. Trajetória com Cenário Completo (mostrando Seguidor de Caminho + efeito da Lei Polar)
         fig, ax = plt.subplots(figsize=(10, 9))
         cenario_linha_montagem(ax)
         ref_pts = obter_pontos_caminho_referencia(segments)
-        ax.plot(ref_pts[:, 0], ref_pts[:, 1], 'm--', linewidth=1.5, label="Caminho Ref. (Retas + Arcos)", zorder=3)
-        ax.plot(log[:, 1], log[:, 2], 'b-', linewidth=2.0, label="Trajetória do P3DX", zorder=4)
+        ax.plot(ref_pts[:, 0], ref_pts[:, 1], 'm--', linewidth=1.5, label="Caminho Ref. (Retas + Arcos R=0.5m)", zorder=3)
+        ax.plot(res_polar_b['log'][:, 1], res_polar_b['log'][:, 2], 'r:', linewidth=1.6, alpha=0.75,
+                label="Lei Polar Direta no Roteiro (Ondulações)", zorder=4)
+        ax.plot(log[:, 1], log[:, 2], 'b-', linewidth=2.1, label="Seguidor de Caminho P3DX (Tarefa B)", zorder=5)
         ax.set_title(f"Tarefa B: Roteiro Completo na Linha de Montagem (Tempo: {t:.1f} s)", fontsize=12, fontweight='bold')
-        ax.legend(loc='lower center', bbox_to_anchor=(0.5, -0.12), ncol=2)
+        ax.legend(loc='lower center', bbox_to_anchor=(0.5, -0.13), ncol=2)
         if salvar:
             fig.savefig(os.path.join(PASTA_FIGURAS, "trajetoria_tarefa_B.png"), dpi=300, bbox_inches='tight')
 
@@ -700,7 +750,7 @@ def executar_seguidor_caminho(ruido=False, semente=None, animar=ANIMACAO, plotar
         axs_sig[0].legend(loc='upper right')
 
         axs_sig[1].plot(t_arr, w_arr, 'm-', linewidth=1.5)
-        axs_sig[1].axhline(np.rad2deg(W_MAX), color='k', linestyle='--', label=f"Saturação (±100°/s)")
+        axs_sig[1].axhline(np.rad2deg(W_MAX), color='k', linestyle='--', label="Saturação (±100°/s)")
         axs_sig[1].axhline(-np.rad2deg(W_MAX), color='k', linestyle='--')
         axs_sig[1].set_ylabel("Vel. Angular $\\omega$ (°/s)")
         axs_sig[1].set_xlabel("Tempo (s)")
@@ -722,19 +772,19 @@ def executar_tarefa_c(num_execucoes=10, salvar=SALVAR_GRAFICOS):
     Tarefa C — Robustez a ruído.
     Executa o roteiro completo 10 vezes com sementes aleatórias distintas,
     utilizando ruído gaussiano na odometria e multiplicativo na atuação.
-    Calcula média e desvio padrão para todas as 6 métricas oficiais.
+    Calcula média e desvio padrão para todas as 6 métricas oficiais (com pose verdadeira).
     """
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 75)
     print(f"EXECUTANDO TAREFA C — ROBUSTEZ A RUÍDO ({num_execucoes} EXECUÇÕES)")
-    print("=" * 70)
+    print("=" * 75)
 
     resultados = []
     for i in range(num_execucoes):
         semente = 100 + i
-        print(f"Execução {i + 1}/{num_execucoes} (Semente: {semente})...", end="", flush=True)
+        print(f"Execução {i + 1:2d}/{num_execucoes} (Semente: {semente})...", end="", flush=True)
         res = executar_seguidor_caminho(ruido=True, semente=semente, animar=False, plotar=False)
         resultados.append(res)
-        print(f" Concluído em {res['tempo_total']:.1f}s | Desvio Máx: {res['maior_desvio_cm']:.2f} cm")
+        print(f" Concluído em {res['tempo_total']:.1f}s | Desvio Máx: {res['maior_desvio_cm']:.2f} cm | Folga Mín: {res['folga_minima']:.3f} m")
 
     # Consolidação estatística
     tempos = [r['tempo_total'] for r in resultados]
@@ -748,31 +798,30 @@ def executar_tarefa_c(num_execucoes=10, salvar=SALVAR_GRAFICOS):
     erros_pos_estacoes = [np.mean([s['rho_cm'] for s in r['estacoes']]) for r in resultados]
     erros_ang_estacoes = [np.mean([s['psi_err_deg'] for s in r['estacoes']]) for r in resultados]
 
-    print("\n" + "=" * 75)
-    print("TABELA DE METRICAS DA TAREFA C (MEDIA +/- DESVIO PADRAO, 10 EXECUCOES)")
-    print("=" * 75)
+    print("\n" + "=" * 88)
+    print("TABELA DE MÉTRICAS DA TAREFA C (MÉDIA ± DESVIO PADRÃO, 10 EXECUÇÕES)")
+    print("=" * 88)
     metricas_c = [
-        ("Tempo total", np.mean(tempos), np.std(tempos), "s", "<= 300 s"),
-        ("Comprimento percorrido", np.mean(comprimentos), np.std(comprimentos), "m", "Ref: ~57.1 m"),
-        ("Erro pose estacoes (rho)", np.mean(erros_pos_estacoes), np.std(erros_pos_estacoes), "cm", "< 3.0 cm"),
-        ("Erro pose estacoes (|dpsi|)", np.mean(erros_ang_estacoes), np.std(erros_ang_estacoes), "deg", "< 2.0 deg"),
-        ("Desvio da referencia (Max.)", np.mean(desvios_max), np.std(desvios_max), "cm", "<= 5.0 cm"),
-        ("Desvio da referencia (RMS)", np.mean(desvios_rms), np.std(desvios_rms), "cm", "---"),
-        ("Folga minima a obstaculos", np.mean(folgas), np.std(folgas), "m", ">= 0.35 m"),
-        ("Esforco de controle (u^2)", np.mean(esforcos_u), np.std(esforcos_u), "m^2/s", "---"),
-        ("Esforco de controle (w^2)", np.mean(esforcos_w), np.std(esforcos_w), "rad^2/s", "---"),
+        ("1. Tempo total", np.mean(tempos), np.std(tempos), "s", "<= 300 s"),
+        ("2. Comprimento percorrido", np.mean(comprimentos), np.std(comprimentos), "m", "Ref: ~57.1 m"),
+        ("3. Erro pose estações (rho)", np.mean(erros_pos_estacoes), np.std(erros_pos_estacoes), "cm", "< 3.0 cm"),
+        ("3. Erro pose estações (|dpsi|)", np.mean(erros_ang_estacoes), np.std(erros_ang_estacoes), "deg", "< 2.0 deg"),
+        ("4. Desvio da referência (Máx.)", np.mean(desvios_max), np.std(desvios_max), "cm", "<= 5.0 cm"),
+        ("4. Desvio da referência (RMS)", np.mean(desvios_rms), np.std(desvios_rms), "cm", "---"),
+        ("5. Folga mínima a obstáculos", np.mean(folgas), np.std(folgas), "m", ">= 0.35 m"),
+        ("6. Esforço de controle (u^2)", np.mean(esforcos_u), np.std(esforcos_u), "m^2/s", "---"),
+        ("6. Esforço de controle (w^2)", np.mean(esforcos_w), np.std(esforcos_w), "rad^2/s", "---"),
     ]
 
-    print(f"{'Metrica':32s} | {'Valor (Media +/- Desvio Padrao)':30s} | {'Unidade':7s} | {'Exigencia':12s}")
-    print("-" * 90)
+    print(f"{'Métrica':32s} | {'Valor (Média ± Desvio Padrão)':30s} | {'Unidade':7s} | {'Exigência':12s}")
+    print("-" * 88)
     for nome, m, s, unid, req in metricas_c:
-        val_str = f"{m:.3f} +/- {s:.3f}"
+        val_str = f"{m:.3f} ± {s:.3f}"
         print(f"{nome:32s} | {val_str:30s} | {unid:7s} | {req:12s}")
-    print("=" * 75)
+    print("=" * 88)
 
     if salvar:
         os.makedirs(PASTA_FIGURAS, exist_ok=True)
-        # Plot da trajetória de uma das rodadas ruidosas comparando real vs odometria
         res_ex = resultados[0]
         log = res_ex['log']
         fig, ax = plt.subplots(figsize=(10, 9))
@@ -780,7 +829,7 @@ def executar_tarefa_c(num_execucoes=10, salvar=SALVAR_GRAFICOS):
         ref_pts = obter_pontos_caminho_referencia(res_ex['segments'])
         ax.plot(ref_pts[:, 0], ref_pts[:, 1], 'm--', linewidth=1.5, label="Referência", zorder=3)
         ax.plot(log[:, 1], log[:, 2], 'b-', linewidth=2.0, label="Pose Verdadeira", zorder=5)
-        ax.plot(log[:, 4], log[:, 5], 'r.', markersize=1.0, alpha=0.4, label="Odometria Ruidosa", zorder=4)
+        ax.plot(log[:, 4], log[:, 5], 'r.', markersize=1.2, alpha=0.45, label="Odometria Ruidosa", zorder=4)
         ax.set_title("Tarefa C: Trajetória com Ruído de Odometria e Atuação", fontsize=12, fontweight='bold')
         ax.legend(loc='lower center', bbox_to_anchor=(0.5, -0.12), ncol=3)
         fig.savefig(os.path.join(PASTA_FIGURAS, "trajetoria_tarefa_C.png"), dpi=300, bbox_inches='tight')
@@ -790,7 +839,7 @@ def executar_tarefa_c(num_execucoes=10, salvar=SALVAR_GRAFICOS):
 
 
 # ==============================================================================
-# TAREFA D: COMPARAÇÃO QUANTITATIVA DE TRÊS ESTRATÉGIAS
+# TAREFA D: COMPARAÇÃO QUANTITATIVA DE TRÊS ESTRATÉGIAS (COM E SEM RUÍDO)
 # ==============================================================================
 WAYPOINTS_ROTA = [
     ('C1', 5.0, -5.0, 90.0, False),
@@ -814,8 +863,11 @@ WAYPOINTS_ROTA = [
 
 
 def executar_estrategia_polar(ruido=False, semente=42):
-    """Estratégia 2: Lei Polar aplicada diretamente aos waypoints da rota."""
+    """Estratégia 2: Lei Polar da Tarefa A aplicada diretamente aos pontos da rota."""
     rng = np.random.default_rng(semente) if ruido else None
+    segments = construir_caminho_referencia(raio_arco=0.5)
+    ref_pts = obter_pontos_caminho_referencia(segments, num_pontos=3000)
+
     P = Pioneer3DX()
     P.rSetPose(0.0, -5.0, np.deg2rad(90.0))
     dt = DT_NOMINAL
@@ -915,22 +967,31 @@ def executar_estrategia_polar(ruido=False, semente=42):
 
         log.append([t, xc_true, yc_true, psi_true, u_app, w_app])
 
+    log_arr = np.array(log)
+    dev_max_cm, dev_rms_cm = calcular_desvio_caminho_referencia(log_arr[:, 1:3], ref_pts)
+
     return {
         'nome': 'Lei Polar (Ponto a Ponto)',
         'tempo': t,
         'dist': total_len,
+        'maior_desvio_cm': dev_max_cm,
+        'rms_desvio_cm': dev_rms_cm,
         'min_obs': folga_min,
         'int_u2': int_u2,
         'int_w2': int_w2,
         'mean_rho': np.mean([s['rho_cm'] for s in station_errs]) if station_errs else 0.0,
         'mean_psi': np.mean([s['psi_err_deg'] for s in station_errs]) if station_errs else 0.0,
-        'log': np.array(log)
+        'estacoes': station_errs,
+        'log': log_arr
     }
 
 
 def executar_estrategia_duas_fases(ruido=False, semente=42):
     """Estratégia 3: Controlador em Duas Fases (Gira-Anda-Gira)."""
     rng = np.random.default_rng(semente) if ruido else None
+    segments = construir_caminho_referencia(raio_arco=0.5)
+    ref_pts = obter_pontos_caminho_referencia(segments, num_pontos=3000)
+
     P = Pioneer3DX()
     P.rSetPose(0.0, -5.0, np.deg2rad(90.0))
     dt = DT_NOMINAL
@@ -1036,108 +1097,141 @@ def executar_estrategia_duas_fases(ruido=False, semente=42):
 
         log.append([t, xc_true, yc_true, psi_true, u_app, w_app])
 
+    log_arr = np.array(log)
+    dev_max_cm, dev_rms_cm = calcular_desvio_caminho_referencia(log_arr[:, 1:3], ref_pts)
+
     return {
         'nome': 'Duas Fases (Gira-Anda-Gira)',
         'tempo': t,
         'dist': total_len,
+        'maior_desvio_cm': dev_max_cm,
+        'rms_desvio_cm': dev_rms_cm,
         'min_obs': folga_min,
         'int_u2': int_u2,
         'int_w2': int_w2,
         'mean_rho': np.mean([s['rho_cm'] for s in station_errs]) if station_errs else 0.0,
         'mean_psi': np.mean([s['psi_err_deg'] for s in station_errs]) if station_errs else 0.0,
-        'log': np.array(log)
+        'estacoes': station_errs,
+        'log': log_arr
     }
 
 
-def executar_tarefa_d(salvar=SALVAR_GRAFICOS):
-    """
-    Tarefa D — Comparação das três estratégias (Seguidor de Caminho, Lei Polar, Duas Fases)
-    com e sem ruído.
-    """
-    print("\n" + "=" * 75)
-    print("EXECUTANDO TAREFA D — COMPARAÇÃO DE ESTRATÉGIAS DE NAVEGAÇÃO")
-    print("=" * 75)
-
-    print("1/3 Executando Seguidor de Caminho (Tarefa B)...")
-    res_b = executar_seguidor_caminho(ruido=False, animar=False, plotar=False)
-
-    print("2/3 Executando Lei Polar Ponto a Ponto...")
-    res_polar = executar_estrategia_polar(ruido=False)
-
-    print("3/3 Executando Controlador em Duas Fases...")
-    res_duas = executar_estrategia_duas_fases(ruido=False)
-
-    # Tabela comparativa
-    print("\n" + "=" * 80)
-    print("TABELA COMPARATIVA DE DESEMPENHO (SEÇÃO 5 DO ENUNCIADO)")
-    print("=" * 80)
-    print(f"{'Métrica':30s} | {'Seguidor Caminho':16s} | {'Lei Polar':16s} | {'Duas Fases':16s}")
+def _imprimir_comparativo_d(subtitulo, res_b, res_polar, res_duas):
+    """Imprime tabela comparativa das três estratégias para um dado cenário (com ou sem ruído)."""
+    print("\n" + "=" * 86)
+    print(f"TABELA COMPARATIVA DE DESEMPENHO — {subtitulo}")
+    print("=" * 86)
+    print(f"{'Métrica (Seção 5)':32s} | {'Seguidor Caminho':16s} | {'Lei Polar':16s} | {'Duas Fases':16s}")
     print("-" * 86)
 
     m_rho_b = np.mean([s['rho_cm'] for s in res_b['estacoes']])
     m_psi_b = np.mean([s['psi_err_deg'] for s in res_b['estacoes']])
 
     linhas = [
-        ("Tempo total (s)", f"{res_b['tempo_total']:.1f}", f"{res_polar['tempo']:.1f}", f"{res_duas['tempo']:.1f}"),
-        ("Comprimento percorrido (m)", f"{res_b['comprimento']:.2f}", f"{res_polar['dist']:.2f}", f"{res_duas['dist']:.2f}"),
-        ("Erro pose estações rho (cm)", f"{m_rho_b:.2f}", f"{res_polar['mean_rho']:.2f}", f"{res_duas['mean_rho']:.2f}"),
-        ("Erro pose estações |dpsi| (°)", f"{m_psi_b:.2f}", f"{res_polar['mean_psi']:.2f}", f"{res_duas['mean_psi']:.2f}"),
-        ("Desvio da referência (Máx. cm)", f"{res_b['maior_desvio_cm']:.2f}", "N/A (oscila)", "N/A (arestas)"),
-        ("Desvio da referência (RMS cm)", f"{res_b['rms_desvio_cm']:.2f}", "N/A", "N/A"),
-        ("Folga mínima obstáculos (m)", f"{res_b['folga_minima']:.3f}", f"{res_polar['min_obs']:.3f}", f"{res_duas['min_obs']:.3f}"),
-        ("Esforço linear int(u²) (m²/s)", f"{res_b['esforco_u2']:.2f}", f"{res_polar['int_u2']:.2f}", f"{res_duas['int_u2']:.2f}"),
-        ("Esforço angular int(w²) (rad²/s)", f"{res_b['esforco_w2']:.2f}", f"{res_polar['int_w2']:.2f}", f"{res_duas['int_w2']:.2f}")
+        ("1. Tempo total (s)", f"{res_b['tempo_total']:.1f}", f"{res_polar['tempo']:.1f}", f"{res_duas['tempo']:.1f}"),
+        ("2. Comprimento percorrido (m)", f"{res_b['comprimento']:.2f}", f"{res_polar['dist']:.2f}", f"{res_duas['dist']:.2f}"),
+        ("3. Erro estações rho (cm)", f"{m_rho_b:.2f}", f"{res_polar['mean_rho']:.2f}", f"{res_duas['mean_rho']:.2f}"),
+        ("3. Erro estações |dpsi| (°)", f"{m_psi_b:.2f}", f"{res_polar['mean_psi']:.2f}", f"{res_duas['mean_psi']:.2f}"),
+        ("4. Desvio da ref. Máx. (cm)", f"{res_b['maior_desvio_cm']:.2f}", f"{res_polar['maior_desvio_cm']:.2f}", f"{res_duas['maior_desvio_cm']:.2f}"),
+        ("4. Desvio da ref. RMS (cm)", f"{res_b['rms_desvio_cm']:.2f}", f"{res_polar['rms_desvio_cm']:.2f}", f"{res_duas['rms_desvio_cm']:.2f}"),
+        ("5. Folga mín. obstáculos (m)", f"{res_b['folga_minima']:.3f}", f"{res_polar['min_obs']:.3f} (VIOLA!)", f"{res_duas['min_obs']:.3f}"),
+        ("6. Esforço linear int(u²) (m²/s)", f"{res_b['esforco_u2']:.2f}", f"{res_polar['int_u2']:.2f}", f"{res_duas['int_u2']:.2f}"),
+        ("6. Esforço angular int(w²) (rad²/s)", f"{res_b['esforco_w2']:.2f}", f"{res_polar['int_w2']:.2f}", f"{res_duas['int_w2']:.2f}")
     ]
 
     for m_nome, v1, v2, v3 in linhas:
-        print(f"{m_nome:30s} | {v1:16s} | {v2:16s} | {v3:16s}")
-    print("=" * 80)
+        print(f"{m_nome:32s} | {v1:16s} | {v2:16s} | {v3:16s}")
+    print("=" * 86)
+
+
+def executar_tarefa_d(salvar=SALVAR_GRAFICOS):
+    """
+    Tarefa D — Comparação das três estratégias (Seguidor de Caminho, Lei Polar, Duas Fases)
+    COM e SEM ruído, conforme exigido na Seção 2 do enunciado.
+    """
+    print("\n" + "=" * 86)
+    print("EXECUTANDO TAREFA D — COMPARAÇÃO DE ESTRATÉGIAS (SEM RUÍDO E COM RUÍDO)")
+    print("=" * 86)
+
+    print("\n[Cenário 1/2: SEM RUÍDO]")
+    res_b_clean = executar_seguidor_caminho(ruido=False, animar=False, plotar=False)
+    res_polar_clean = executar_estrategia_polar(ruido=False)
+    res_duas_clean = executar_estrategia_duas_fases(ruido=False)
+    _imprimir_comparativo_d("SEM RUÍDO", res_b_clean, res_polar_clean, res_duas_clean)
+
+    print("\n[Cenário 2/2: COM RUÍDO DE ODOMETRIA E ATUAÇÃO (Semente = 42)]")
+    res_b_noise = executar_seguidor_caminho(ruido=True, semente=42, animar=False, plotar=False)
+    res_polar_noise = executar_estrategia_polar(ruido=True, semente=42)
+    res_duas_noise = executar_estrategia_duas_fases(ruido=True, semente=42)
+    _imprimir_comparativo_d("COM RUÍDO (Semente = 42)", res_b_noise, res_polar_noise, res_duas_noise)
 
     if salvar:
         os.makedirs(PASTA_FIGURAS, exist_ok=True)
         # Plot comparativo de trajetórias no mesmo cenário
         fig, ax = plt.subplots(figsize=(10, 9))
         cenario_linha_montagem(ax)
-        ref_pts = obter_pontos_caminho_referencia(res_b['segments'])
+        ref_pts = obter_pontos_caminho_referencia(res_b_clean['segments'])
         ax.plot(ref_pts[:, 0], ref_pts[:, 1], 'k--', linewidth=1.2, alpha=0.6, label="Referência Oficial")
-        ax.plot(res_b['log'][:, 1], res_b['log'][:, 2], 'g-', linewidth=2.2, label="1) Seguidor de Caminho (Recomendado)")
-        ax.plot(res_duas['log'][:, 1], res_duas['log'][:, 2], 'b-.', linewidth=1.6, label="2) Duas Fases (Gira-Anda-Gira)")
-        ax.plot(res_polar['log'][:, 1], res_polar['log'][:, 2], 'r:', linewidth=2.0, label="3) Lei Polar (Ondulações)")
+        ax.plot(res_b_clean['log'][:, 1], res_b_clean['log'][:, 2], 'g-', linewidth=2.2, label="1) Seguidor de Caminho (Recomendado)")
+        ax.plot(res_duas_clean['log'][:, 1], res_duas_clean['log'][:, 2], 'b-.', linewidth=1.6, label="2) Duas Fases (Gira-Anda-Gira)")
+        ax.plot(res_polar_clean['log'][:, 1], res_polar_clean['log'][:, 2], 'r:', linewidth=2.0, label="3) Lei Polar (Ondulações)")
 
         ax.set_title("Tarefa D: Comparação de Trajetórias das Três Estratégias", fontsize=12, fontweight='bold')
         ax.legend(loc='lower center', bbox_to_anchor=(0.5, -0.13), ncol=2)
         fig.savefig(os.path.join(PASTA_FIGURAS, "comparacao_trajetorias_tarefa_D.png"), dpi=300, bbox_inches='tight')
 
-        # Gráfico de barras comparativo de métricas principais
-        fig_bar, axs_bar = plt.subplots(1, 3, figsize=(12, 4))
+        # Gráfico de barras comparativo de métricas principais (Sem Ruído vs Com Ruído)
+        fig_bar, axs_bar = plt.subplots(1, 3, figsize=(13, 4.5))
         estrategias = ['Seguidor', 'Lei Polar', 'Duas Fases']
-        cores = ['#2ca02c', '#d62728', '#1f77b4']
+        x_pos = np.arange(len(estrategias))
+        width = 0.35
 
-        # Tempo total
-        axs_bar[0].bar(estrategias, [res_b['tempo_total'], res_polar['tempo'], res_duas['tempo']], color=cores)
-        axs_bar[0].set_ylabel("Segundos (s)")
-        axs_bar[0].set_title("Tempo Total de Missão")
+        m_rho_b_clean = np.mean([s['rho_cm'] for s in res_b_clean['estacoes']])
+        m_rho_b_noise = np.mean([s['rho_cm'] for s in res_b_noise['estacoes']])
+
+        # 1. Erro de posição nas estações (Sem vs Com Ruído)
+        axs_bar[0].bar(x_pos - width/2, [m_rho_b_clean, res_polar_clean['mean_rho'], res_duas_clean['mean_rho']],
+                       width, label='Sem Ruído', color='#2ca02c')
+        axs_bar[0].bar(x_pos + width/2, [m_rho_b_noise, res_polar_noise['mean_rho'], res_duas_noise['mean_rho']],
+                       width, label='Com Ruído', color='#ff7f0e')
+        axs_bar[0].axhline(3.0, color='r', linestyle='--', label='Tolerância (3.0 cm)')
+        axs_bar[0].set_xticks(x_pos)
+        axs_bar[0].set_xticklabels(estrategias)
+        axs_bar[0].set_ylabel("Erro $\\rho$ (cm)")
+        axs_bar[0].set_title("Erro Médio nas Estações")
         axs_bar[0].grid(True, axis='y', linestyle=':')
+        axs_bar[0].legend(fontsize=8)
 
-        # Folga mínima
-        axs_bar[1].bar(estrategias, [res_b['folga_minima'], res_polar['min_obs'], res_duas['min_obs']], color=cores)
-        axs_bar[1].axhline(0.35, color='r', linestyle='--', label="Limite Mínimo (0.35m)")
+        # 2. Folga mínima a obstáculos
+        axs_bar[1].bar(x_pos - width/2, [res_b_clean['folga_minima'], res_polar_clean['min_obs'], res_duas_clean['min_obs']],
+                       width, label='Sem Ruído', color='#1f77b4')
+        axs_bar[1].bar(x_pos + width/2, [res_b_noise['folga_minima'], res_polar_noise['min_obs'], res_duas_noise['min_obs']],
+                       width, label='Com Ruído', color='#9467bd')
+        axs_bar[1].axhline(0.35, color='r', linestyle='--', label="Limite Mínimo (0.35 m)")
+        axs_bar[1].set_xticks(x_pos)
+        axs_bar[1].set_xticklabels(estrategias)
         axs_bar[1].set_ylabel("Distância (m)")
         axs_bar[1].set_title("Folga Mínima a Obstáculos")
         axs_bar[1].grid(True, axis='y', linestyle=':')
-        axs_bar[1].legend(loc='lower right')
+        axs_bar[1].legend(fontsize=8, loc='lower right')
 
-        # Esforço angular
-        axs_bar[2].bar(estrategias, [res_b['esforco_w2'], res_polar['int_w2'], res_duas['int_w2']], color=cores)
+        # 3. Esforço angular
+        axs_bar[2].bar(x_pos - width/2, [res_b_clean['esforco_w2'], res_polar_clean['int_w2'], res_duas_clean['int_w2']],
+                       width, label='Sem Ruído', color='#2ca02c')
+        axs_bar[2].bar(x_pos + width/2, [res_b_noise['esforco_w2'], res_polar_noise['int_w2'], res_duas_noise['int_w2']],
+                       width, label='Com Ruído', color='#d62728')
+        axs_bar[2].set_xticks(x_pos)
+        axs_bar[2].set_xticklabels(estrategias)
         axs_bar[2].set_ylabel("rad²/s")
-        axs_bar[2].set_title("Esforço de Controle Angular $\\int \\omega^2 dt$")
+        axs_bar[2].set_title("Esforço Angular $\\int \\omega^2 dt$")
         axs_bar[2].grid(True, axis='y', linestyle=':')
+        axs_bar[2].legend(fontsize=8)
 
         fig_bar.tight_layout()
         fig_bar.savefig(os.path.join(PASTA_FIGURAS, "comparacao_metricas_tarefa_D.png"), dpi=300, bbox_inches='tight')
         plt.show(block=False)
 
-    return res_b, res_polar, res_duas
+    return (res_b_clean, res_polar_clean, res_duas_clean), (res_b_noise, res_polar_noise, res_duas_noise)
 
 
 # ==============================================================================
@@ -1156,36 +1250,42 @@ def main():
         if '--animar' in sys.argv:
             ANIMACAO = True
 
-    print("\n" + "#" * 70)
+    print("\n" + "#" * 75)
     print("ROBÓTICA TERRESTRE — IFBA CAMPUS VITÓRIA DA CONQUISTA")
     print(f"Executando modo: TAREFA = '{TAREFA}', RUÍDO = {HABILITAR_RUIDO}, ANIMAÇÃO = {ANIMACAO}")
-    print("#" * 70)
+    print("#" * 75)
 
     if TAREFA == 'A':
         executar_tarefa_a()
     elif TAREFA == 'B':
         res = executar_seguidor_caminho(ruido=HABILITAR_RUIDO, animar=ANIMACAO, plotar=True)
-        print("\n" + "=" * 60)
-        print("RESULTADOS OFICIAIS DA TAREFA B:")
-        print("=" * 60)
-        print(f"Tempo total:                {res['tempo_total']:.1f} s  (exigencia <= 300 s)")
-        print(f"Comprimento percorrido:     {res['comprimento']:.2f} m  (nominal 57.1 m)")
-        print(f"Maior desvio da rota:       {res['maior_desvio_cm']:.2f} cm (exigencia <= 5.0 cm)")
-        print(f"Desvio RMS da rota:         {res['rms_desvio_cm']:.2f} cm")
-        print(f"Folga minima a obstaculos:  {res['folga_minima']:.3f} m  (exigencia >= 0.35 m)")
-        print(f"Esforco linear (int u^2):   {res['esforco_u2']:.2f} m^2/s")
-        print(f"Esforco angular (int w^2):  {res['esforco_w2']:.2f} rad^2/s")
-        print("\nParadas nas Estacoes:")
+        m_rho = float(np.mean([s['rho_cm'] for s in res['estacoes']]))
+        m_psi = float(np.mean([s['psi_err_deg'] for s in res['estacoes']]))
+        imprimir_tabela_metricas(
+            f"TABELA OFICIAL DE MÉTRICAS — TAREFA B (RUÍDO = {HABILITAR_RUIDO})",
+            res['tempo_total'], res['comprimento'], m_rho, m_psi,
+            res['maior_desvio_cm'], res['rms_desvio_cm'], res['folga_minima'],
+            res['esforco_u2'], res['esforco_w2']
+        )
+        print("\nDetalhamento de Parada nas Estações (Requisito: rho < 3.0 cm e |dpsi| < 2.0°):")
         for st in res['estacoes']:
-            print(f"  - {st['name']:15s}: rho = {st['rho_cm']:.2f} cm (< 3.0 cm), "
-                  f"|dpsi| = {st['psi_err_deg']:.2f} deg (< 2.0 deg)")
+            ok = "APROVADO" if (st['rho_cm'] < 3.0 and st['psi_err_deg'] < 2.0) else "REPROVADO"
+            print(f"  - {st['name']:8s}: rho = {st['rho_cm']:.2f} cm | |dpsi| = {st['psi_err_deg']:.2f}° | [{ok}]")
     elif TAREFA == 'C':
         executar_tarefa_c(num_execucoes=10)
     elif TAREFA == 'D':
         executar_tarefa_d()
     elif TAREFA == 'TODAS':
         executar_tarefa_a()
-        executar_seguidor_caminho(ruido=False, animar=False, plotar=True)
+        res_b = executar_seguidor_caminho(ruido=False, animar=False, plotar=True)
+        m_rho = float(np.mean([s['rho_cm'] for s in res_b['estacoes']]))
+        m_psi = float(np.mean([s['psi_err_deg'] for s in res_b['estacoes']]))
+        imprimir_tabela_metricas(
+            "TABELA OFICIAL DE MÉTRICAS — TAREFA B (SEM RUÍDO)",
+            res_b['tempo_total'], res_b['comprimento'], m_rho, m_psi,
+            res_b['maior_desvio_cm'], res_b['rms_desvio_cm'], res_b['folga_minima'],
+            res_b['esforco_u2'], res_b['esforco_w2']
+        )
         executar_tarefa_c(num_execucoes=10)
         executar_tarefa_d()
 
